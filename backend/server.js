@@ -103,44 +103,67 @@ app.get('/api/digital-count', async (req, res) => {
 });
 
 // New endpoint to fetch specific machine data by esp_id
+// New endpoint to fetch specific machine data by esp_id and date range
+// New endpoint to fetch specific machine data by esp_id and date range
 app.get('/api/machine/:espId', async (req, res) => {
   const espId = req.params.espId;
-  const date = getTableForEspId(espId); // Get the date based on espId
+  const { fromDate, toDate } = req.query;
 
-  if (!date) {
-    return res.status(404).json({ message: 'Machine not found' });
+  if (!fromDate || !toDate) {
+      return res.status(400).json({ message: 'Both fromDate and toDate are required' });
   }
 
-  const tableName = `sensor_data_${date}`; // Construct the table name
+  const startDate = fromDate.replace(/(\d{2})(\d{2})(\d{4})/, '$1$2$3');
+  const endDate = toDate.replace(/(\d{2})(\d{2})(\d{4})/, '$1$2$3');
+
+  console.log('Start Date:', startDate);
+  console.log('End Date:', endDate);
+
+  const tables = await new Promise((resolve, reject) => {
+      db.all("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'sensor_data_%'", [], (err, tables) => {
+          if (err) {
+              return reject(new Error('Error retrieving table names'));
+          }
+          resolve(tables);
+      });
+  });
+
+  console.log('Tables:', tables);
+
+  const countPromises = tables.map(table => {
+      return new Promise((resolve, reject) => {
+          const dateFromTable = table.name.split('_')[2]; // Extract date part
+
+          if (dateFromTable >= startDate && dateFromTable <= endDate) {
+              db.all(`SELECT COUNT(digital) AS digital_count 
+                      FROM ${table.name} 
+                      WHERE esp_id = ? AND digital = 1`, [espId], (err, rows) => {
+                  if (err) {
+                      console.error(`Error retrieving data from table ${table.name}:`, err);
+                      return reject(err);
+                  }
+
+                  console.log(`Rows from ${table.name}:`, rows); // Log the returned rows
+                  resolve(rows.reduce((total, row) => total + (row.digital_count || 0), 0));
+              });
+          } else {
+              resolve(0);
+          }
+      });
+  });
 
   try {
-    const query = `
-      SELECT esp_id, COUNT(digital) AS digital_count, MAX(machine_status) AS machine_status 
-      FROM ${tableName} 
-      WHERE digital = 1 
-      GROUP BY esp_id
-    `;
-    
-    db.get(query, [], (err, row) => {
-      if (err) {
-        console.error(`Error retrieving data for esp_id ${espId}:`, err);
-        return res.status(500).json({ message: 'Error retrieving machine data' });
-      }
-      if (row) {
-        return res.json({
-          esp_id: row.esp_id,
-          digital_count: row.digital_count,
-          machine_status: row.machine_status,
-        });
-      } else {
-        return res.status(404).json({ message: 'Machine not found' });
-      }
-    });
+      const results = await Promise.all(countPromises);
+      const totalDigitalCount = results.reduce((total, count) => total + count, 0);
+      
+      return res.json({ totalDigitalCount });
   } catch (err) {
-    console.error('Error retrieving machine data:', err);
-    return res.status(500).json({ message: 'Error retrieving machine data' });
+      console.error('Error retrieving machine data:', err);
+      return res.status(500).json({ message: 'Error retrieving machine data' });
   }
 });
+
+
 
 // Start the server
 app.listen(PORT, () => {
